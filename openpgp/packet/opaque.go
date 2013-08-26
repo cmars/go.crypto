@@ -7,6 +7,7 @@ package packet
 import (
 	"bytes"
 	"code.google.com/p/go.crypto/openpgp/errors"
+	"encoding/binary"
 	"io"
 	"io/ioutil"
 )
@@ -145,5 +146,22 @@ func nextSubpacket(contents []byte) (subHeaderLen uint32, subPacket *OpaqueSubpa
 	return
 Truncated:
 	err = errors.StructuralError("subpacket truncated")
+	return
+}
+
+func (osp *OpaqueSubpacket) Serialize(w io.Writer) (err error) {
+	buf := make([]byte, 5)
+	buf[0] = 0xff
+	binary.BigEndian.PutUint32(buf[1:5], osp.Length)
+	_, err = w.Write(buf)
+	if err != nil {
+		return
+	}
+	buf[0] = osp.SubType
+	_, err = w.Write(buf[:1])
+	if err != nil {
+		return
+	}
+	_, err = w.Write(osp.Contents)
 	return
 }
