@@ -29,7 +29,7 @@ import (
 	"text/template"
 	"time"
 
-	"code.google.com/p/go.crypto/ssh"
+	"github.com/cmars/go.crypto/ssh"
 )
 
 const sshd_config = `

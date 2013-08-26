@@ -6,9 +6,9 @@
 package openpgp
 
 import (
-	"code.google.com/p/go.crypto/openpgp/armor"
-	"code.google.com/p/go.crypto/openpgp/errors"
-	"code.google.com/p/go.crypto/openpgp/packet"
+	"github.com/cmars/go.crypto/openpgp/armor"
+	"github.com/cmars/go.crypto/openpgp/errors"
+	"github.com/cmars/go.crypto/openpgp/packet"
 	"crypto"
 	_ "crypto/sha256"
 	"hash"

@@ -8,8 +8,8 @@ package packet
 
 import (
 	"bufio"
-	"code.google.com/p/go.crypto/cast5"
-	"code.google.com/p/go.crypto/openpgp/errors"
+	"github.com/cmars/go.crypto/cast5"
+	"github.com/cmars/go.crypto/openpgp/errors"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"

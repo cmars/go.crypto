@@ -15,7 +15,7 @@ import (
 	"net"
 	"testing"
 
-	"code.google.com/p/go.crypto/ssh/terminal"
+	"github.com/cmars/go.crypto/ssh/terminal"
 )
 
 type serverType func(*serverChan, *testing.T)

@@ -6,7 +6,7 @@ package packet
 
 import (
 	"bytes"
-	"code.google.com/p/go.crypto/openpgp/armor"
+	"github.com/cmars/go.crypto/openpgp/armor"
 	"crypto"
 	"encoding/hex"
 	"io"
