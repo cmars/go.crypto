@@ -7,6 +7,7 @@
 package packet
 
 import (
+	"bufio"
 	"code.google.com/p/go.crypto/cast5"
 	"code.google.com/p/go.crypto/openpgp/errors"
 	"crypto/aes"
@@ -297,6 +298,17 @@ const (
 	packetTypeSymmetricallyEncryptedMDC packetType = 18
 )
 
+func peekVersion(r io.Reader) (bufr *bufio.Reader, ver byte, err error) {
+	bufr = bufio.NewReader(r)
+	var verBuf []byte
+	verBuf, err = bufr.Peek(1)
+	if err != nil {
+		return
+	}
+	ver = verBuf[0]
+	return
+}
+
 // Read reads a single OpenPGP packet from the given io.Reader. If there is an
 // error parsing a packet, the whole packet is consumed from the input.
 func Read(r io.Reader) (p Packet, err error) {
@@ -309,7 +321,17 @@ func Read(r io.Reader) (p Packet, err error) {
 	case packetTypeEncryptedKey:
 		p = new(EncryptedKey)
 	case packetTypeSignature:
-		p = new(Signature)
+		var version byte
+		// Detect signature version
+		contents, version, err = peekVersion(contents)
+		if err != nil {
+			return
+		}
+		if version < 4 {
+			p = new(SignatureV3)
+		} else {
+			p = new(Signature)
+		}
 	case packetTypeSymmetricKeyEncrypted:
 		p = new(SymmetricKeyEncrypted)
 	case packetTypeOnePassSignature:
@@ -321,11 +343,24 @@ func Read(r io.Reader) (p Packet, err error) {
 		}
 		p = pk
 	case packetTypePublicKey, packetTypePublicSubkey:
-		pk := new(PublicKey)
-		if tag == packetTypePublicSubkey {
-			pk.IsSubkey = true
+		var version byte
+		contents, version, err = peekVersion(contents)
+		if err != nil {
+			return
 		}
-		p = pk
+		if version < 4 {
+			p = new(PublicKeyV3)
+		} else {
+			p = new(PublicKey)
+		}
+		if tag == packetTypePublicSubkey {
+			switch pk := p.(type) {
+			case *PublicKey:
+				pk.IsSubkey = true
+			case *PublicKeyV3:
+				pk.IsSubkey = true
+			}
+		}
 	case packetTypeCompressed:
 		p = new(Compressed)
 	case packetTypeSymmetricallyEncrypted:

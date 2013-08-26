@@ -475,7 +475,7 @@ func (sig *Signature) Sign(h hash.Hash, priv *PrivateKey, config *Config) (err e
 // Serialize to write it out.
 // If config is nil, sensible defaults will be used.
 func (sig *Signature) SignUserId(id string, pub *PublicKey, priv *PrivateKey, config *Config) error {
-	h, err := userIdSignatureHash(id, pub, sig)
+	h, err := userIdSignatureHash(id, pub, sig.Hash)
 	if err != nil {
 		return nil
 	}
@@ -486,7 +486,7 @@ func (sig *Signature) SignUserId(id string, pub *PublicKey, priv *PrivateKey, co
 // success, the signature is stored in sig. Call Serialize to write it out.
 // If config is nil, sensible defaults will be used.
 func (sig *Signature) SignKey(pub *PublicKey, priv *PrivateKey, config *Config) error {
-	h, err := keySignatureHash(&priv.PublicKey, pub, sig)
+	h, err := keySignatureHash(&priv.PublicKey, pub, sig.Hash)
 	if err != nil {
 		return err
 	}

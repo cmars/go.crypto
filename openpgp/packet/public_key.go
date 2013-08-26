@@ -7,6 +7,7 @@ package packet
 import (
 	"code.google.com/p/go.crypto/openpgp/elgamal"
 	"code.google.com/p/go.crypto/openpgp/errors"
+	"crypto"
 	"crypto/dsa"
 	"crypto/rsa"
 	"crypto/sha1"
@@ -29,6 +30,11 @@ type PublicKey struct {
 	IsSubkey     bool
 
 	n, e, p, q, g, y parsedMPI
+}
+
+type signingKey interface {
+	SerializeSignaturePrefix(hash.Hash)
+	serializeWithoutHeaders(io.Writer) error
 }
 
 func fromBig(n *big.Int) parsedMPI {
@@ -321,10 +327,56 @@ func (pk *PublicKey) VerifySignature(signed hash.Hash, sig *Signature) (err erro
 	panic("unreachable")
 }
 
+// VerifySignatureV3 returns nil iff sig is a valid signature, made by this
+// public key, of the data hashed into signed. signed is mutated by this call.
+func (pk *PublicKey) VerifySignatureV3(signed hash.Hash, sig *SignatureV3) (err error) {
+	if !pk.CanSign() {
+		return errors.InvalidArgumentError("public key cannot generate signatures")
+	}
+
+	suffix := make([]byte, 5)
+	suffix[0] = byte(sig.SigType)
+	binary.BigEndian.PutUint32(suffix[1:], uint32(sig.CreationTime.Unix()))
+	signed.Write(suffix)
+	hashBytes := signed.Sum(nil)
+
+	if hashBytes[0] != sig.HashTag[0] || hashBytes[1] != sig.HashTag[1] {
+		return errors.SignatureError("hash tag doesn't match")
+	}
+
+	if pk.PubKeyAlgo != sig.PubKeyAlgo {
+		return errors.InvalidArgumentError("public key and signature use different algorithms")
+	}
+
+	switch pk.PubKeyAlgo {
+	case PubKeyAlgoRSA, PubKeyAlgoRSASignOnly:
+		rsaPublicKey, _ := pk.PublicKey.(*rsa.PublicKey)
+		err = rsa.VerifyPKCS1v15(rsaPublicKey, sig.Hash, hashBytes, sig.RSASignature.bytes)
+		if err != nil {
+			return errors.SignatureError("RSA verification failure")
+		}
+		return nil
+	case PubKeyAlgoDSA:
+		dsaPublicKey, _ := pk.PublicKey.(*dsa.PublicKey)
+		// Need to truncate hashBytes to match FIPS 186-3 section 4.6.
+		subgroupSize := (dsaPublicKey.Q.BitLen() + 7) / 8
+		if len(hashBytes) > subgroupSize {
+			hashBytes = hashBytes[:subgroupSize]
+		}
+		if !dsa.Verify(dsaPublicKey, hashBytes, new(big.Int).SetBytes(sig.DSASigR.bytes), new(big.Int).SetBytes(sig.DSASigS.bytes)) {
+			return errors.SignatureError("DSA verification failure")
+		}
+		return nil
+	default:
+		panic("shouldn't happen")
+	}
+	panic("unreachable")
+}
+
 // keySignatureHash returns a Hash of the message that needs to be signed for
 // pk to assert a subkey relationship to signed.
-func keySignatureHash(pk, signed *PublicKey, sig *Signature) (h hash.Hash, err error) {
-	h = sig.Hash.New()
+func keySignatureHash(pk, signed signingKey, hfn crypto.Hash) (h hash.Hash, err error) {
+	h = hfn.New()
 	if h == nil {
 		return nil, errors.UnsupportedError("hash function")
 	}
@@ -340,7 +392,7 @@ func keySignatureHash(pk, signed *PublicKey, sig *Signature) (h hash.Hash, err e
 // VerifyKeySignature returns nil iff sig is a valid signature, made by this
 // public key, of signed.
 func (pk *PublicKey) VerifyKeySignature(signed *PublicKey, sig *Signature) (err error) {
-	h, err := keySignatureHash(pk, signed, sig)
+	h, err := keySignatureHash(pk, signed, sig.Hash)
 	if err != nil {
 		return err
 	}
@@ -349,8 +401,8 @@ func (pk *PublicKey) VerifyKeySignature(signed *PublicKey, sig *Signature) (err 
 
 // userIdSignatureHash returns a Hash of the message that needs to be signed
 // to assert that pk is a valid key for id.
-func userIdSignatureHash(id string, pk *PublicKey, sig *Signature) (h hash.Hash, err error) {
-	h = sig.Hash.New()
+func userIdSignatureHash(id string, pk *PublicKey, hfn crypto.Hash) (h hash.Hash, err error) {
+	h = hfn.New()
 	if h == nil {
 		return nil, errors.UnsupportedError("hash function")
 	}
@@ -374,11 +426,21 @@ func userIdSignatureHash(id string, pk *PublicKey, sig *Signature) (h hash.Hash,
 // VerifyUserIdSignature returns nil iff sig is a valid signature, made by this
 // public key, of id.
 func (pk *PublicKey) VerifyUserIdSignature(id string, sig *Signature) (err error) {
-	h, err := userIdSignatureHash(id, pk, sig)
+	h, err := userIdSignatureHash(id, pk, sig.Hash)
 	if err != nil {
 		return err
 	}
 	return pk.VerifySignature(h, sig)
+}
+
+// VerifyUserIdSignatureV3 returns nil iff sig is a valid signature, made by this
+// public key, of id.
+func (pk *PublicKey) VerifyUserIdSignatureV3(id string, sig *SignatureV3) (err error) {
+	h, err := userIdSignatureV3Hash(id, pk, sig.Hash)
+	if err != nil {
+		return err
+	}
+	return pk.VerifySignatureV3(h, sig)
 }
 
 // KeyIdString returns the public key's fingerprint in capital hex
