@@ -5,12 +5,17 @@
 package packet
 
 import (
+	"bytes"
 	"code.google.com/p/go.crypto/openpgp/elgamal"
 	"code.google.com/p/go.crypto/openpgp/errors"
 	"crypto"
 	"crypto/dsa"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/sha1"
+	_ "crypto/sha256"
+	_ "crypto/sha512"
 	"encoding/binary"
 	"fmt"
 	"hash"
@@ -20,16 +25,133 @@ import (
 	"time"
 )
 
+var curveOidP256 []byte = []byte{0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07}
+
+var curveOidP384 []byte = []byte{0x2B, 0x81, 0x04, 0x00, 0x22}
+
+var curveOidP521 []byte = []byte{0x2B, 0x81, 0x04, 0x00, 0x23}
+
+type ecFields struct {
+	oid []byte
+	p   parsedMPI
+}
+
+func parseOID(r io.Reader) (oid []byte, err error) {
+	buf := make([]byte, 8)
+	_, err = readFull(r, buf[:1])
+	if err != nil {
+		return
+	}
+	oidLen := buf[0]
+	if int(oidLen) > len(buf) {
+		err = errors.UnsupportedError("invalid oid length: " + strconv.Itoa(int(oidLen)))
+		return
+	}
+	_, err = readFull(r, buf[:oidLen])
+	oid = buf[:oidLen]
+	return
+}
+
+func (f *ecFields) parse(r io.Reader) (err error) {
+	f.oid, err = parseOID(r)
+	if err != nil {
+		return err
+	}
+	f.p.bytes, f.p.bitLength, err = readMPI(r)
+	return
+}
+
+func (f *ecFields) serialize(w io.Writer) (err error) {
+	buf := make([]byte, 8)
+	buf[0] = byte(len(f.oid))
+	_, err = w.Write(buf[:1])
+	if err != nil {
+		return
+	}
+	copy(buf[:], []byte(f.oid))
+	_, err = w.Write(buf[:len(f.oid)])
+	return writeMPIs(w, f.p)
+}
+
+func (f *ecFields) newECDSA() (*ecdsa.PublicKey, error) {
+	var c elliptic.Curve
+	if bytes.Equal(f.oid, curveOidP256) {
+		c = elliptic.P256()
+	} else if bytes.Equal(f.oid, curveOidP384) {
+		c = elliptic.P384()
+	} else if bytes.Equal(f.oid, curveOidP521) {
+		c = elliptic.P521()
+	} else {
+		return nil, errors.UnsupportedError(fmt.Sprintf("unsupported oid: %x", f.oid))
+	}
+	x, y := elliptic.Unmarshal(c, f.p.bytes)
+	return &ecdsa.PublicKey{Curve: c, X: x, Y: y}, nil
+}
+
+func (f *ecFields) byteLen() int {
+	return 1 + len(f.oid) + 2 + len(f.p.bytes)
+}
+
+type kdfHashFunction byte
+type kdfAlgorithm byte
+
+type ecdhFields struct {
+	KdfHash kdfHashFunction
+	KdfAlgo kdfAlgorithm
+}
+
+func (f *ecdhFields) parse(r io.Reader) (err error) {
+	buf := make([]byte, 1)
+	_, err = readFull(r, buf[:])
+	if err != nil {
+		return
+	}
+	kdfLen := int(buf[0])
+	buf = make([]byte, kdfLen)
+	_, err = readFull(r, buf[:])
+	if err != nil {
+		return
+	}
+	if kdfLen < 3 {
+		return errors.UnsupportedError("Unsupported ECDH KDF length: " + strconv.Itoa(kdfLen))
+	}
+	reserved := int(buf[0])
+	f.KdfHash = kdfHashFunction(buf[1])
+	f.KdfAlgo = kdfAlgorithm(buf[2])
+	if reserved != 0x01 {
+		return errors.UnsupportedError("Unsupported KDF reserved field: " + strconv.Itoa(reserved))
+	}
+	return
+}
+
+func (f *ecdhFields) serialize(w io.Writer) (err error) {
+	buf := make([]byte, 4)
+	buf[0] = byte(0x03)
+	buf[1] = byte(0x01)
+	buf[2] = byte(f.KdfHash)
+	buf[3] = byte(f.KdfAlgo)
+	_, err = w.Write(buf[:])
+	return
+}
+
+func (f *ecdhFields) byteLen() int {
+	return 4
+}
+
 // PublicKey represents an OpenPGP public key. See RFC 4880, section 5.5.2.
 type PublicKey struct {
 	CreationTime time.Time
 	PubKeyAlgo   PublicKeyAlgorithm
-	PublicKey    interface{} // Either a *rsa.PublicKey or *dsa.PublicKey
+	PublicKey    interface{} // *rsa.PublicKey, *dsa.PublicKey or *ecdsa.PublicKey
 	Fingerprint  [20]byte
 	KeyId        uint64
 	IsSubkey     bool
 
 	n, e, p, q, g, y parsedMPI
+
+	// RFC 6637 fields
+	ec   *ecFields
+	ecdh *ecdhFields
 }
 
 type signingKey interface {
@@ -93,6 +215,25 @@ func (pk *PublicKey) parse(r io.Reader) (err error) {
 		err = pk.parseDSA(r)
 	case PubKeyAlgoElGamal:
 		err = pk.parseElGamal(r)
+	case PubKeyAlgoECDSA:
+		pk.ec = new(ecFields)
+		err = pk.ec.parse(r)
+		if err != nil {
+			return err
+		}
+		pk.PublicKey, err = pk.ec.newECDSA()
+	case PubKeyAlgoECDH:
+		pk.ec = new(ecFields)
+		err = pk.ec.parse(r)
+		if err != nil {
+			return
+		}
+		pk.ecdh = new(ecdhFields)
+		err = pk.ecdh.parse(r)
+		if err != nil {
+			return
+		}
+		pk.PublicKey, err = pk.ec.newECDSA()
 	default:
 		err = errors.UnsupportedError("public key type: " + strconv.Itoa(int(pk.PubKeyAlgo)))
 	}
@@ -212,6 +353,11 @@ func (pk *PublicKey) SerializeSignaturePrefix(h hash.Hash) {
 		pLength += 2 + uint16(len(pk.p.bytes))
 		pLength += 2 + uint16(len(pk.g.bytes))
 		pLength += 2 + uint16(len(pk.y.bytes))
+	case PubKeyAlgoECDSA:
+		pLength += uint16(pk.ec.byteLen())
+	case PubKeyAlgoECDH:
+		pLength += uint16(pk.ec.byteLen())
+		pLength += uint16(pk.ecdh.byteLen())
 	default:
 		panic("unknown public key algorithm")
 	}
@@ -236,6 +382,11 @@ func (pk *PublicKey) Serialize(w io.Writer) (err error) {
 		length += 2 + len(pk.p.bytes)
 		length += 2 + len(pk.g.bytes)
 		length += 2 + len(pk.y.bytes)
+	case PubKeyAlgoECDSA:
+		length += pk.ec.byteLen()
+	case PubKeyAlgoECDH:
+		length += pk.ec.byteLen()
+		length += pk.ecdh.byteLen()
 	default:
 		panic("unknown public key algorithm")
 	}
@@ -275,6 +426,14 @@ func (pk *PublicKey) serializeWithoutHeaders(w io.Writer) (err error) {
 		return writeMPIs(w, pk.p, pk.q, pk.g, pk.y)
 	case PubKeyAlgoElGamal:
 		return writeMPIs(w, pk.p, pk.g, pk.y)
+	case PubKeyAlgoECDSA:
+		return pk.ec.serialize(w)
+	case PubKeyAlgoECDH:
+		err = pk.ec.serialize(w)
+		if err != nil {
+			return
+		}
+		return pk.ecdh.serialize(w)
 	}
 	return errors.InvalidArgumentError("bad public-key algorithm")
 }
@@ -321,8 +480,14 @@ func (pk *PublicKey) VerifySignature(signed hash.Hash, sig *Signature) (err erro
 			return errors.SignatureError("DSA verification failure")
 		}
 		return nil
+	case PubKeyAlgoECDSA:
+		ecdsaPublicKey, _ := pk.PublicKey.(*ecdsa.PublicKey)
+		if !ecdsa.Verify(ecdsaPublicKey, hashBytes, new(big.Int).SetBytes(sig.ECDSASigR.bytes), new(big.Int).SetBytes(sig.ECDSASigS.bytes)) {
+			return errors.SignatureError("ECDSA verification failure")
+		}
+		return nil
 	default:
-		panic("shouldn't happen")
+		return errors.SignatureError("Unsupported public key algorithm used in signature")
 	}
 	panic("unreachable")
 }
